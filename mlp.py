@@ -1,9 +1,12 @@
 import numpy as np
+from numba import jit
 import os
 import sys
 import sklearn
 from sklearn import datasets
 from sklearn.preprocessing import OneHotEncoder
+import autograd.numpy as grad_np
+from autograd import elementwise_grad as egrad
 
 def normalized(a, axis=-1, order=2):
     l2 = np.atleast_1d(np.linalg.norm(a, order, axis))
@@ -75,19 +78,21 @@ class Loss:
     def __init__(self):
         pass
 
-    # TODO: currect cross_entropy and cross_entropy_dx function
     @staticmethod
     def cross_entropy(x, t, epslion=1e-10):
         ''' return cross entropy loss of input-x and target-t'''
         x = np.array(x)
         t = np.array(t)
-        return np.vectorize(lambda xi, ti: -( ti * np.log(xi+epslion) + (1.-ti) * np.log(1.-xi+epslion) ))(x, t).sum()
+        return np.vectorize(lambda xi, ti: -( ti * np.log(xi+epslion) + (1.-ti) * np.log(1.-xi-epslion) ))(x, t).sum()
 
     @staticmethod
     def cross_entropy_dx(x, t, epslion=1e-10):
-        x = np.array(x)
-        t = np.array(t)
-        return np.vectorize(lambda xi, ti: -( ti * (1./(xi+epslion)) + (1.-ti) * (1./(1.-xi+epslion)) ))(x, t)
+        ''' return the differential of cross_entropy by autograd since it's not differentialable when x=0 '''
+        x = grad_np.array(x)
+        t = grad_np.array(t)
+        def ce(x):
+            return -(t*grad_np.log(x) + (1.-t)*grad_np.log(1.-x))
+        return egrad(ce)(x)
 
     @staticmethod
     def mse(x, t):
@@ -129,11 +134,13 @@ class MLPClassifier:
             else:
                 self.parent_layer = None
 
+        @jit
         def __call__(self, x):
             self.__cache['x'] = x
             self.__cache['wx'] = np.matmul(self.w, x) + self.b
             return self.activation(self.__cache['wx'])
 
+        @jit
         def __grad(self):
             delta = self.__cache['delta'].reshape(self.__cache['delta'].shape[0], 1)
             x = self.__cache['x'].reshape(1, self.__cache['x'].shape[0])
@@ -141,6 +148,7 @@ class MLPClassifier:
             grad_b = self.__cache['delta']
             return grad_w, grad_b
 
+        @jit
         def backpropagation(self, loss_dx_delta):
             if self.next_layer is None: # output_layer
                 self.__cache['delta'] = loss_dx_delta * self.activation_dx( self.__cache['wx'] )
@@ -161,6 +169,7 @@ class MLPClassifier:
                 rtn_grad_b = np.array(rtn_grad_b)
             return rtn_grad_w, rtn_grad_b
 
+        @jit
         def update(self, updates_w, updates_b):
             self.w = self.w - updates_w[-1]
             self.b = self.b - updates_b[-1]
@@ -170,9 +179,9 @@ class MLPClassifier:
     def __init__(
             self,
             hidden_layer_sizes=128,
-            n_hidden_layers=3,
-            activation='leaky_relu', solver='sgd',
-            loss='mse',
+            n_hidden_layers=10,
+            activation='relu', solver='sgd',
+            loss='cross_entropy',
             weight_initializer='orthogonal',
             bias_initializer='zeros',
             batch_size=16,
@@ -206,6 +215,7 @@ class MLPClassifier:
 
     def __backpropagation(self, predict_y, true_y):
         loss_dx = self.loss_dx(predict_y, true_y)
+        # print('bp', predict_y, true_y, loss_dx)
         return self.output_layer.backpropagation(loss_dx) # all gradient
 
     def __update(self, updates_w, updates_b):
