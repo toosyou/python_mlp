@@ -18,6 +18,14 @@ class Activation:
         pass
 
     @staticmethod
+    def linear(x):
+        return x
+
+    @staticmethod
+    def linear_dx(x):
+        return np.vectorize(lambda _: 1.)(x)
+
+    @staticmethod
     def relu(x):
         return np.vectorize(lambda xi: max(xi, 0.))(x)
 
@@ -93,6 +101,14 @@ class Loss:
         def ce(x):
             return -(t*grad_np.log(x) + (1.-t)*grad_np.log(1.-x))
         return egrad(ce)(x)
+
+    @staticmethod
+    def softmax_cross_entropy(x, t):
+        return Loss.cross_entropy(Activation.softmax(x), t)
+
+    @staticmethod
+    def softmax_cross_entropy_dx(x, t):
+        return Activation.softmax(x) - t
 
     @staticmethod
     def mse(x, t):
@@ -181,7 +197,7 @@ class MLPClassifier:
             hidden_layer_sizes=128,
             n_hidden_layers=10,
             activation='relu', solver='sgd',
-            loss='cross_entropy',
+            loss='softmax_cross_entropy',
             weight_initializer='orthogonal',
             bias_initializer='zeros',
             batch_size=16,
@@ -254,7 +270,7 @@ class MLPClassifier:
         self.output_layer = self.__fc_layer(
                                     input_layer=self.hidden_layers[-1] if len(self.hidden_layers) else self.input_dim,
                                     n_unit=self.output_dim,
-                                    activation='softmax',
+                                    activation='linear',
                                     weight_initializer=self.weight_initializer,
                                     bias_initializer=self.bias_initializer
                                 )
