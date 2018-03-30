@@ -3,9 +3,11 @@ from numba import jit
 import os
 import sys
 import sklearn
+import better_exceptions
 from sklearn import datasets
 from sklearn.preprocessing import OneHotEncoder
 
+@jit(nogil=True, parallel=True)
 def normalized(a, axis=-1, order=2):
     l2 = np.atleast_1d(np.linalg.norm(a, order, axis))
     l2[l2==0] = 1
@@ -30,6 +32,18 @@ class Activation:
     @staticmethod
     def relu_dx(x):
         return np.vectorize(lambda xi: 1. if xi > 0. else 0.)(x)
+
+    @staticmethod
+    def selu(x):
+        l = 1.0507009873554804934193349852946
+        a = 1.6732632423543772848170429916717
+        return np.vectorize(lambda xi: l*xi if xi > 0. else l*a*(np.exp(xi)-1.))(x)
+
+    @staticmethod
+    def selu_dx(x):
+        l = 1.0507009873554804934193349852946
+        a = 1.6732632423543772848170429916717
+        return np.vectorize(lambda xi: l if xi > 0. else l*a*np.exp(xi))(x)
 
     @staticmethod
     def leaky_relu(x):
@@ -125,6 +139,7 @@ class Optimizer:
             self.momentum = momentum
             self.nesterov = nesterov
 
+        @jit(nogil=True, parallel=True)
         def cal_updates(self, grad_w, grad_b, lr):
             if self.nesterov:
                 updates_w = ( grad_w + self.momentum*(self.last_updates_w + grad_w - self.last_grad_w) ) * lr
@@ -140,6 +155,47 @@ class Optimizer:
             self.last_updates_b = updates_b
 
             return updates_w, updates_b
+
+class LRScheduler:
+    def __init__(self): pass
+
+    class reduce_on_loss_plateau:
+        def __init__(self, lr_decay=0.5, patience=20, verbose=True):
+            self.best_loss = np.inf
+            self.wait = 0
+            self.patience = patience
+            self.lr_decay = lr_decay
+            self.verbose = verbose
+
+        def new_lr(self, loss, old_lr):
+            self.wait += 1
+            if self.wait < self.patience:
+                if self.best_loss > loss:
+                    if self.verbose: print('best_loss: %.4f -> %.4f' % (self.best_loss, loss))
+                    self.wait = 0 # reset
+                    self.best_loss = loss
+                return old_lr
+            else:
+                self.wait = 0 # reset
+                if self.verbose: print('reduce_lr: %.6f -> %.6f' % (old_lr, old_lr*self.lr_decay))
+                return old_lr * self.lr_decay
+
+class EarlyStop:
+    def __init__(self, patience=40, verbose=True):
+        self.best_loss = np.inf
+        self.wait = 0
+        self.patience = patience
+        self.verbose = verbose
+
+    def need_stop(self, loss):
+        self.wait += 1
+        if self.wait < self.patience:
+            if self.best_loss > loss:
+                self.wait = 0 # reset
+                self.best_loss = loss
+            return False
+        if self.verbose: print('early stop!')
+        return True
 
 class MLPClassifier:
     class __fc_layer:
@@ -169,13 +225,13 @@ class MLPClassifier:
             else:
                 self.parent_layer = None
 
-        @jit
+        @jit(nogil=True, parallel=True)
         def __call__(self, x):
             self.__cache['x'] = x
             self.__cache['wx'] = np.matmul(self.w, x) + self.b
             return self.activation(self.__cache['wx'])
 
-        @jit
+        @jit(nogil=True, parallel=True)
         def __grad(self):
             delta = self.__cache['delta'].reshape(self.__cache['delta'].shape[0], 1)
             x = self.__cache['x'].reshape(1, self.__cache['x'].shape[0])
@@ -183,7 +239,7 @@ class MLPClassifier:
             grad_b = self.__cache['delta']
             return grad_w, grad_b
 
-        @jit
+        @jit(nogil=True, parallel=True)
         def backpropagation(self, loss_dx_delta):
             if self.next_layer is None: # output_layer
                 self.__cache['delta'] = loss_dx_delta * self.activation_dx( self.__cache['wx'] )
@@ -204,7 +260,7 @@ class MLPClassifier:
                 rtn_grad_b = np.array(rtn_grad_b)
             return rtn_grad_w, rtn_grad_b
 
-        @jit
+        @jit(nogil=True, parallel=True)
         def update(self, updates_w, updates_b):
             self.w = self.w - updates_w[-1]
             self.b = self.b - updates_b[-1]
@@ -215,16 +271,18 @@ class MLPClassifier:
             self,
             hidden_layer_sizes=128,
             n_hidden_layers=10,
-            activation='relu',
+            activation='selu',
             solver='sgd',
             momentum=0.,
             nesterov=False,
             loss='cross_entropy',
             weight_initializer='orthogonal',
             bias_initializer='zeros',
-            batch_size=16,
+            batch_size=32,
             learning_rate=0.01,
-            learning_rate_decay=0.95
+            lr_decay_on_plateau=0.5,
+            lr_decay_patience=15,
+            early_stop_patience=40
         ):
         loss_need_convert = ['cross_entropy']
 
@@ -237,7 +295,8 @@ class MLPClassifier:
         self.bias_initializer = bias_initializer
         self.learning_rate = learning_rate
         self.n_hidden_layers = n_hidden_layers
-        self.learning_rate_decay = learning_rate_decay
+        self.lr_scheduler = LRScheduler.reduce_on_loss_plateau(lr_decay=lr_decay_on_plateau, patience=lr_decay_patience)
+        self.early_stop = EarlyStop(patience=early_stop_patience)
         self.optimizer = getattr(Optimizer, solver.lower())(momentum=momentum, nesterov=nesterov)
 
         # softmax + cross_entropy -> softmax_cross_entropy
@@ -291,13 +350,7 @@ class MLPClassifier:
             loss += self.loss(py, yi)
         return n_currect / X.shape[0], loss / X.shape[0]
 
-    def fit(self, X, y, valid_set=None, epochs=100, shuffle=True):
-        X = np.array(X) # (?, input_dim)
-        y = np.array(y) # (?, output_dim)
-
-        self.input_dim = X.shape[1]
-        self.output_dim = y.shape[1]
-
+    def __init_network(self):
         self.hidden_layers = list()
 
         for i in range(self.n_hidden_layers):
@@ -310,11 +363,21 @@ class MLPClassifier:
                                     weight_initializer=self.weight_initializer,
                                     bias_initializer=self.bias_initializer
                                 )
+        return None
+
+    def fit(self, X, y, valid_set=None, epochs=100, shuffle=True):
+        X = np.array(X) # (?, input_dim)
+        y = np.array(y) # (?, output_dim)
+
+        self.input_dim = X.shape[1]
+        self.output_dim = y.shape[1]
+
+        self.__init_network()
 
         for index_epoch in range(epochs):
             if shuffle: X, y = sklearn.utils.shuffle(X, y)
             for batch_x, batch_y in self.__batchlize(X, y):
-                # SGD
+                # calculate average gradient
                 grad_w_sum = None
                 grad_b_sum = None
                 for xi, yi in zip(batch_x, batch_y):
@@ -329,18 +392,21 @@ class MLPClassifier:
                 updates_w, updates_b = self.optimizer.cal_updates(grad_w_avg, grad_b_avg, self.learning_rate)
                 self.__update(updates_w, updates_b)
 
-            # update learning rate
-            self.learning_rate *= self.learning_rate_decay
-
             # result
             train_acc, train_loss = self.__accuracy_loss(X[:self.batch_size], y[:self.batch_size])
             if valid_set is not None:
                 valid_acc, valid_loss = self.__accuracy_loss(valid_set[0], valid_set[1])
 
+            # update learning rate
+            self.learning_rate = self.lr_scheduler.new_lr(valid_loss if valid_set is not None else train_loss, self.learning_rate)
+
             print('epochs: %d/%d lr: %.6f' % (index_epoch, epochs, self.learning_rate), end=' ')
             print('loss: %.4f acc: %.4f ' % (train_loss, train_acc), end='\n' if valid_set is None else '')
             if valid_set is not None:
                 print('valid_loss: %.4f valid_acc: %.4f' % (valid_loss, valid_acc))
+
+            if self.early_stop.need_stop(valid_loss if valid_set is not None else train_loss):
+                return None
 
         return None
 
@@ -363,5 +429,5 @@ if __name__ == '__main__':
     train_x, train_y = X[:int(X.shape[0]*train_ratio)], y[:int(y.shape[0]*train_ratio)]
     valid_x, valid_y = X[int(X.shape[0]*train_ratio):], y[int(y.shape[0]*train_ratio):]
 
-    mlp_clf = MLPClassifier(batch_size=min(16, y.shape[0]), momentum=0.4, nesterov=True)
+    mlp_clf = MLPClassifier(batch_size=min(32, y.shape[0]), momentum=0.4, nesterov=True)
     mlp_clf.fit(train_x, train_y, valid_set=(valid_x, valid_y), epochs=10000)
