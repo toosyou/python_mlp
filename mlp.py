@@ -2,10 +2,7 @@ import numpy as np
 from numba import jit
 import os
 import sys
-import sklearn
 import better_exceptions
-from sklearn import datasets
-from sklearn.preprocessing import OneHotEncoder
 
 @jit(nogil=True, parallel=True)
 def normalized(a, axis=-1, order=2):
@@ -418,6 +415,10 @@ class MLPClassifier:
         return np.array(rtn)
 
 if __name__ == '__main__':
+    import sklearn
+    from sklearn import datasets
+    from sklearn.preprocessing import OneHotEncoder
+
     iris = datasets.load_iris()
     X = normalized(iris.data)
     y = OneHotEncoder().fit_transform(iris.target.reshape(iris.target.shape[0], 1)).toarray()
