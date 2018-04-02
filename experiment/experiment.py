@@ -2,26 +2,12 @@ import better_exceptions
 import sklearn
 from sklearn import datasets
 from sklearn.preprocessing import OneHotEncoder
-from tqdm import tqdm
 import pickle
 import sys
 sys.path.append('..')
 import mlp
-from numba import jit
+from mlp import normalized, split
 import numpy as np
-
-@jit(nogil=True, parallel=True)
-def normalized(a, axis=-1, order=2):
-    l2 = np.atleast_1d(np.linalg.norm(a, order, axis))
-    l2[l2==0] = 1
-    return a / np.expand_dims(l2, axis)
-
-def split(X, y, train_ratio):
-    X = np.array(X)
-    y = np.array(y)
-    train_x, train_y = X[:int(X.shape[0]*train_ratio)], y[:int(y.shape[0]*train_ratio)]
-    valid_x, valid_y = X[int(X.shape[0]*train_ratio):], y[int(y.shape[0]*train_ratio):]
-    return train_x, train_y, valid_x, valid_y
 
 def number_layer_exp(X, y):
     # split to training and validation set

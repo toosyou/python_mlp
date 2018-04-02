@@ -4,6 +4,19 @@ import os
 import sys
 import sklearn # for shuffle
 
+def split(X, y, train_ratio):
+    X = np.array(X)
+    y = np.array(y)
+    train_x, train_y = X[:int(X.shape[0]*train_ratio)], y[:int(y.shape[0]*train_ratio)]
+    valid_x, valid_y = X[int(X.shape[0]*train_ratio):], y[int(y.shape[0]*train_ratio):]
+    return train_x, train_y, valid_x, valid_y
+
+@jit(nogil=True, parallel=True)
+def normalized(a, axis=-1, order=2):
+    l2 = np.atleast_1d(np.linalg.norm(a, order, axis))
+    l2[l2==0] = 1
+    return a / np.expand_dims(l2, axis)
+
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
@@ -424,4 +437,31 @@ class MLPClassifier:
         return np.array(rtn)
 
 if __name__ == '__main__':
-    pass
+    from sklearn import datasets
+    from sklearn.preprocessing import OneHotEncoder
+    
+    iris = datasets.load_iris()
+    X = normalized(iris.data)
+    y = OneHotEncoder().fit_transform(iris.target.reshape(iris.target.shape[0], 1)).toarray()
+
+    X, y = sklearn.utils.shuffle(X, y)
+
+    # split to training and validation set
+    train_x, train_y, valid_x, valid_y = split(X, y, 0.7)
+
+    mlp_clf = MLPClassifier(
+                    hidden_layer_sizes=128,
+                    n_hidden_layers=9,
+                    activation='selu',
+                    solver='sgd',
+                    momentum=0.4,
+                    nesterov=False,
+                    loss='cross_entropy',
+                    weight_initializer='orthogonal',
+                    bias_initializer='zeros',
+                    batch_size=32,
+                    learning_rate=0.01,
+                    lr_decay_on_plateau=0.5,
+                    lr_decay_patience=15,
+                    early_stop_patience=40)
+    history = mlp_clf.fit(train_x, train_y, valid_set=(valid_x, valid_y), epochs=2000, verbose=True)
